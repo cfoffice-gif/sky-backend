@@ -35,7 +35,11 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
 }
 
 // --- Supabase client ---
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+  realtime: {
+    enabled: false
+  }
+});
 
 // --- Telegram bot ---
 const bot = new Bot(TELEGRAM_BOT_TOKEN);
