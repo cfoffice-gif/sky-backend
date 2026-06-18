@@ -18,7 +18,6 @@
     "grammy": "^1.44.0",
     "node-telegram-bot-api": "^1.1.0",
     "openai": "^6.42.0",
-    "playwright": "^1.60.0",
     "telegram-bot-api": "^2.0.1"
   }
 }
