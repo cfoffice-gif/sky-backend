@@ -1,6 +1,9 @@
 {
   "name": "office-automation-backend",
   "version": "1.0.0",
+  "engines": {
+  "node": "22.x"
+},
   "description": "",
   "main": "server.js",
   "scripts": {
