@@ -345,7 +345,39 @@ setInterval(async () => {
     console.error("Reminder checker error:", err.message);
   }
 }, 60000);
+// =============================
+// Desktop Job Completion Watcher
+// =============================
+setInterval(async () => {
+  try {
+    const { data: jobs, error } = await supabase
+      .from("desktop_jobs")
+      .select("*")
+      .eq("status", "completed")
+      .eq("notified", false);
 
+    if (error || !jobs || jobs.length === 0) return;
+
+    for (const job of jobs) {
+      try {
+        await bot.api.sendMessage(
+          Number(job.telegram_id),
+          `✅ Desktop completed:\n\n${job.action}`
+        );
+
+        await supabase
+          .from("desktop_jobs")
+          .update({ notified: true })
+          .eq("id", job.id);
+
+      } catch (err) {
+        console.error("Desktop notification error:", err);
+      }
+    }
+  } catch (err) {
+    console.error("Desktop watcher error:", err);
+  }
+}, 3000);
 // --- Send command to Python desktop agent ---
 async function sendToPythonAgent(body) {
   try {
