@@ -102,6 +102,28 @@ async function saveReminder(userName, reminder, dueAt) {
     console.error("Reminder insert error:", error);
   }
 }
+async function createDesktopJob(currentUser, action, payload) {
+  const { data, error } = await supabase
+    .from("desktop_jobs")
+    .insert([
+      {
+        user_name: currentUser.name,
+        telegram_id: String(currentUser.telegramId || ""),
+        action,
+        payload,
+        status: "pending"
+      }
+    ])
+    .select()
+    .single();
+
+  if (error) {
+    console.error("Desktop job insert error:", error);
+    return { success: false, error: error.message };
+  }
+
+  return { success: true, job: data };
+}
 async function saveFileMemory(userName, fileType, fileName, filePath, description) {
   const { data, error } = await supabase
     .from("files")
@@ -932,18 +954,46 @@ Response:
       return tool.message || "Done.";
     }
 
-    const result = await executeAgentTool(tool);
-    
-    console.log("Tool chosen:", tool);
-    console.log("Result:", result);
+  console.log("Tool chosen:", tool);
+
+if (
+  tool.action === "openProgram" ||
+  tool.action === "describeScreen" ||
+  tool.action === "screenshot" ||
+  tool.action === "move" ||
+  tool.action === "click" ||
+  tool.action === "doubleClick" ||
+  tool.action === "rightClick" ||
+  tool.action === "type" ||
+  tool.action === "hotkey" ||
+  tool.action === "press" ||
+  tool.action === "scroll" ||
+  tool.action === "drag"
+) {
+  const jobResult = await createDesktopJob(
+    currentUser,
+    tool.action,
+    tool
+  );
+
+  if (!jobResult.success) {
+    return "I tried to send that to the office computer, but got this error: " + jobResult.error;
+  }
+
+  return "I sent that to the office computer. Job #" + jobResult.job.id + " is waiting for the desktop agent.";
+}
+
+const result = await executeAgentTool(tool);
+
+console.log("Result:", result);
     
     if (tool.action === "remember") {
 
-  await saveMemory(
-    currentUser.name,
-    "note",
-    task
-  );
+  await memory.saveMemory(
+  currentUser.name,
+  "note",
+  task
+);
 
   return "Okay, I will remember that.";
 }
