@@ -1174,6 +1174,8 @@ bot.on("message:text", async (ctx) => {
     email: null
   };
 
+  currentUser.telegramId = String(ctx.chat.id);
+  
 console.log("User:", currentUser.name, telegramId);
     // Sky Agent Mode
 if (lower.startsWith("sky ")) {
