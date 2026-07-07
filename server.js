@@ -604,21 +604,38 @@ async function listOfficePreferences() {
 }
 
 // --- Sky personality ---
+// --- Sky personality ---
 const SYSTEM_PROMPT = `
-You are Sky, an AI office assistant for Chelsi and Centennial Pools.
+You are Sky, the AI Operations Manager for Centennial Pools.
 
-You help with:
-- Pool customer communication
-- Proposals and contracts
-- Office workflows
-- Follow-up messages
-- Pool design planning
-- Permit and inspection reminders
-- Business searches
-- Computer control through the desktop agent
+Your primary responsibility is to help run the office efficiently for Chelsi, Sara, Kenneth, and the Centennial Pools team.
 
-Speak clearly, practically, and professionally.
-Keep answers helpful, concise, and business-focused.
+You naturally assist with:
+- Customer communication
+- Office operations
+- Scheduling
+- Reminders and follow-ups
+- Pool proposals and contracts
+- Permits and inspections
+- Material orders
+- Project organization
+- Computer automation through the desktop agent
+
+Always speak naturally like an experienced executive assistant.
+
+Never expose technical details like tool names, actions, job IDs, JSON, or internal processes unless someone specifically asks.
+
+If you are working on something, explain it naturally.
+
+Examples:
+"I'm opening Structure Studios now."
+"I've finished creating the proposal."
+"I'll remind you next Monday."
+"I couldn't complete that because the customer file couldn't be found."
+
+Keep responses professional, calm, friendly, and concise.
+
+Your goal is to save the team time, keep everyone organized, and remember important information for future conversations.
 `;
 
 // --- Helpers ---
@@ -766,7 +783,7 @@ Response:
 
 Use this when the user is asking a question, wants advice, needs an explanation, or is having a conversation.
 
-9. 9. reminder
+9. reminder
 
 Use this when the user asks to be reminded later.
 
@@ -780,7 +797,45 @@ Response:
 
 10. createSpreadsheet
 
-11. createPDF
+11. listReminders
+
+Use this when the user asks about:
+- reminders
+- follow ups
+- tasks
+- to do list
+- queue
+- what do I have to do
+- what is pending
+- what should I work on today
+
+Examples:
+
+User:
+What reminders do I have?
+
+Return:
+{"action":"listReminders"}
+
+User:
+What is in my queue?
+
+Return:
+{"action":"listReminders"}
+
+User:
+What do I need to do today?
+
+Return:
+{"action":"listReminders"}
+
+User:
+Show my follow ups.
+
+Return:
+{"action":"listReminders"}
+
+12. createPDF
 
 Use this when the user asks for:
 
@@ -1028,6 +1083,31 @@ const jobResult = await createDesktopJob(
 const result = await executeAgentTool(tool);
 
 console.log("Result:", result);
+
+if (result.listReminders) {
+  const { data, error } = await supabase
+    .from("reminders")
+    .select("*")
+    .eq("telegram_id", currentUser.telegramId)
+    .eq("completed", false)
+    .order("due_at", { ascending: true });
+
+  if (error) {
+    return "I couldn't retrieve your reminders right now.";
+  }
+
+  if (!data || data.length === 0) {
+    return "You don't have any active reminders.";
+  }
+
+  let message = "Here are your active reminders:\n\n";
+
+  for (const reminder of data) {
+    message += `• ${reminder.reminder}\n`;
+  }
+
+  return message;
+}
     
     if (tool.action === "remember") {
 
