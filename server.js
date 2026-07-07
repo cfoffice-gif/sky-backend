@@ -705,6 +705,12 @@ async function executeAgentTool(tool) {
     return { success: true, remember: true };
   }
 
+  if (tool.action === "listReminders") {
+  return {
+    success: true,
+    listReminders: true,
+  };
+}
   return {
     success: false,
     error: "Unknown tool action: " + tool.action,
