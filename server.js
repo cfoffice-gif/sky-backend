@@ -33,7 +33,7 @@ const USERS = {
     email: "sara@centennialpools.com"
   },
   "KEN_TELEGRAM_ID": {
-    name: "Kenneth",
+    name: "Ken",
     role: "owner",
     email: "ken@centennialpools.com"
   }
@@ -85,24 +85,31 @@ async function getMemories(userName) {
   
   return data || [];
 }
-async function saveReminder(userName, reminder, dueAt) {
+async function saveReminder(userName, telegramId, reminder, dueAt, originalText) {
   const { data, error } = await supabase
     .from("reminders")
     .insert([
       {
         user_name: userName,
+        telegram_id: String(telegramId || ""),
         reminder,
-        due_at: dueAt
+        due_at: dueAt,
+        original_text: originalText,
+        completed: false,
+        sent: false
       }
-    ]);
+    ])
+    .select();
 
   console.log("Reminder insert data:", data);
 
   if (error) {
     console.error("Reminder insert error:", error);
   }
+
+  return { data, error };
 }
-async function createDesktopJob(currentUser, action, payload) {
+async function createDesktopJob(currentUser, action, payload, description) {
   const { data, error } = await supabase
     .from("desktop_jobs")
     .insert([
@@ -111,6 +118,7 @@ async function createDesktopJob(currentUser, action, payload) {
         telegram_id: String(currentUser.telegramId || ""),
         action,
         payload,
+        description,
         status: "pending"
       }
     ])
@@ -323,13 +331,9 @@ setInterval(async () => {
     const reminders = await getDueReminders();
 
     for (const reminder of reminders) {
-      const userEntry = Object.entries(USERS).find(
-        ([id, user]) => user.name === reminder.user_name
-      );
+      const telegramId = reminder.telegram_id;
 
-      if (!userEntry) continue;
-
-      const telegramId = userEntry[0];
+      if (!telegramId) continue;
 
       await bot.api.sendMessage(
         telegramId,
@@ -362,8 +366,8 @@ setInterval(async () => {
       try {
         await bot.api.sendMessage(
           Number(job.telegram_id),
-          `✅ Desktop completed:\n\n${job.action}`
-        );
+          `✅ ${job.description} completed.`
+      );
 
         await supabase
           .from("desktop_jobs")
@@ -1002,11 +1006,17 @@ if (
   tool.action === "scroll" ||
   tool.action === "drag"
 ) {
-  const jobResult = await createDesktopJob(
-    currentUser,
-    tool.action,
-    tool
-  );
+  const desktopDescription =
+  tool.action === "openProgram"
+    ? "Opening " + (tool.program || tool.text || "the program")
+    : "Running desktop action: " + tool.action;
+
+const jobResult = await createDesktopJob(
+  currentUser,
+  tool.action,
+  tool,
+  desktopDescription
+);
 
   if (!jobResult.success) {
     return "I tried to send that to the office computer, but got this error: " + jobResult.error;
@@ -1062,10 +1072,12 @@ Return JSON in this exact format:
   }
 
   await saveReminder(
-    currentUser.name,
-    parsed.reminder,
-    parsed.dueAt
-  );
+  currentUser.name,
+  currentUser.telegramId,
+  parsed.reminder,
+  parsed.dueAt,
+  task
+);
 
   return "Okay, I will remind you.";
 }
@@ -1175,7 +1187,7 @@ bot.on("message:text", async (ctx) => {
   };
 
   currentUser.telegramId = String(ctx.chat.id);
-  
+
 console.log("User:", currentUser.name, telegramId);
     // Sky Agent Mode
 if (lower.startsWith("sky ")) {
