@@ -454,6 +454,70 @@ async function createDesktopJob(currentUser, action, payload, description) {
 
   return { success: true, job: data };
 }
+
+function getRequestedProgram(task) {
+  const lower = String(task || "").toLowerCase();
+
+  if (!/\b(open|pull up|launch|start|bring up|get into)\b/.test(lower)) {
+    return null;
+  }
+
+  if (
+    lower.includes("structure studios") ||
+    lower.includes("structure studio") ||
+    lower.includes("pool design") ||
+    lower.includes("design software") ||
+    lower.includes("structure")
+  ) {
+    return "structure";
+  }
+
+  if (lower.includes("outlook") || lower.includes("email") || lower.includes("mail")) {
+    return "outlook";
+  }
+
+  if (lower.includes("chrome") || lower.includes("google") || lower.includes("browser")) {
+    return "chrome";
+  }
+
+  if (lower.includes("excel") || lower.includes("spreadsheet")) {
+    return "excel";
+  }
+
+  if (lower.includes("word") || lower.includes("document")) {
+    return "word";
+  }
+
+  if (lower.includes("notepad")) {
+    return "notepad";
+  }
+
+  if (lower.includes("calculator")) {
+    return "calculator";
+  }
+
+  return null;
+}
+
+async function queueDesktopTool(currentUser, tool) {
+  const desktopDescription =
+    tool.action === "openProgram"
+      ? "Opening " + (tool.program || tool.text || "the program")
+      : "Running desktop action: " + tool.action;
+
+  const jobResult = await createDesktopJob(
+    currentUser,
+    tool.action,
+    tool,
+    desktopDescription
+  );
+
+  if (!jobResult.success) {
+    return "I tried to send that to the office computer, but got this error: " + jobResult.error;
+  }
+
+  return "I sent that to the office computer. Job #" + jobResult.job.id + " is waiting for the desktop agent.";
+}
 async function saveFileMemory(userName, fileType, fileName, filePath, description) {
   const { data, error } = await supabase
     .from("files")
@@ -1061,6 +1125,15 @@ async function executeAgentTool(tool) {
 }
 
 async function runAgentTask(task, currentUser) {
+  const requestedProgram = getRequestedProgram(task);
+
+  if (requestedProgram) {
+    return await queueDesktopTool(currentUser, {
+      action: "openProgram",
+      program: requestedProgram
+    });
+  }
+
   const url = "https://api.openai.com/v1/chat/completions";
 
   const systemPrompt = `
@@ -1410,23 +1483,7 @@ if (
   tool.action === "scroll" ||
   tool.action === "drag"
 ) {
-  const desktopDescription =
-  tool.action === "openProgram"
-    ? "Opening " + (tool.program || tool.text || "the program")
-    : "Running desktop action: " + tool.action;
-
-const jobResult = await createDesktopJob(
-  currentUser,
-  tool.action,
-  tool,
-  desktopDescription
-);
-
-  if (!jobResult.success) {
-    return "I tried to send that to the office computer, but got this error: " + jobResult.error;
-  }
-
-  return "I sent that to the office computer. Job #" + jobResult.job.id + " is waiting for the desktop agent.";
+  return await queueDesktopTool(currentUser, tool);
 }
 
 const result = await executeAgentTool(tool);
