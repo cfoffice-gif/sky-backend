@@ -499,6 +499,96 @@ function getRequestedProgram(task) {
   return null;
 }
 
+function getSkyTask(text) {
+  const match = String(text || "").match(/^\s*sky(?:[\s,.:;!-]+)(.+)$/i);
+  return match ? match[1].trim() : null;
+}
+
+function getDirectDesktopTool(task) {
+  const text = String(task || "").trim();
+  const lower = text.toLowerCase();
+  const requestedProgram = getRequestedProgram(text);
+
+  if (requestedProgram) {
+    return {
+      action: "openProgram",
+      program: requestedProgram
+    };
+  }
+
+  if (
+    lower === "screenshot" ||
+    lower === "take a screenshot" ||
+    lower === "save a screenshot"
+  ) {
+    return { action: "screenshot" };
+  }
+
+  if (
+    lower === "describe screen" ||
+    lower === "describe my screen" ||
+    lower === "what do you see" ||
+    lower === "what do you see on my screen" ||
+    lower.includes("look at my screen")
+  ) {
+    return { action: "describeScreen" };
+  }
+
+  if (lower === "save" || lower === "save this") {
+    return { action: "save" };
+  }
+
+  if (lower === "click") {
+    return { action: "click" };
+  }
+
+  if (lower === "right click") {
+    return { action: "rightClick" };
+  }
+
+  if (lower === "double click") {
+    return { action: "doubleClick" };
+  }
+
+  if (lower === "scroll") {
+    return { action: "scroll", y: -500 };
+  }
+
+  const moveMatch = lower.match(/^move\s+(-?\d+)\s+(-?\d+)$/);
+  if (moveMatch) {
+    return {
+      action: "move",
+      x: Number(moveMatch[1]),
+      y: Number(moveMatch[2])
+    };
+  }
+
+  const dragMatch = lower.match(/^drag\s+(-?\d+)\s+(-?\d+)$/);
+  if (dragMatch) {
+    return {
+      action: "drag",
+      x: Number(dragMatch[1]),
+      y: Number(dragMatch[2])
+    };
+  }
+
+  if (lower.startsWith("type ")) {
+    return {
+      action: "type",
+      text: text.slice(5).trim()
+    };
+  }
+
+  if (lower.startsWith("hotkey ")) {
+    return {
+      action: "hotkey",
+      keys: lower.replace("hotkey", "").trim().split(/\s+/).filter(Boolean)
+    };
+  }
+
+  return null;
+}
+
 async function queueDesktopTool(currentUser, tool) {
   const desktopDescription =
     tool.action === "openProgram"
@@ -516,7 +606,25 @@ async function queueDesktopTool(currentUser, tool) {
     return "I tried to send that to the office computer, but got this error: " + jobResult.error;
   }
 
-  return "I sent that to the office computer. Job #" + jobResult.job.id + " is waiting for the desktop agent.";
+  if (tool.action === "openProgram") {
+    const programName = tool.program || tool.text || "that program";
+    const displayName = programName === "structure" ? "Structure Studios" : programName;
+    return "I'm opening " + displayName + " now.";
+  }
+
+  if (tool.action === "describeScreen") {
+    return "I'm checking your screen now.";
+  }
+
+  if (tool.action === "screenshot") {
+    return "I'm taking a screenshot now.";
+  }
+
+  if (tool.action === "save") {
+    return "I'm saving that now.";
+  }
+
+  return "I'm sending that to the office computer now.";
 }
 async function saveFileMemory(userName, fileType, fileName, filePath, description) {
   const { data, error } = await supabase
@@ -1125,13 +1233,10 @@ async function executeAgentTool(tool) {
 }
 
 async function runAgentTask(task, currentUser) {
-  const requestedProgram = getRequestedProgram(task);
+  const directDesktopTool = getDirectDesktopTool(task);
 
-  if (requestedProgram) {
-    return await queueDesktopTool(currentUser, {
-      action: "openProgram",
-      program: requestedProgram
-    });
+  if (directDesktopTool) {
+    return await queueDesktopTool(currentUser, directDesktopTool);
   }
 
   const url = "https://api.openai.com/v1/chat/completions";
@@ -1689,7 +1794,8 @@ bot.on("message:text", async (ctx) => {
 
 console.log("User:", currentUser.name, telegramId);
 
-    const reminderCommand = lower.replace(/^sky\s+/, "");
+    const skyTask = getSkyTask(text);
+    const reminderCommand = skyTask ? skyTask.toLowerCase() : lower;
 
     if (isListReminderRequest(reminderCommand)) {
       const queryOptions = getReminderQueryOptions(reminderCommand);
@@ -1716,9 +1822,14 @@ console.log("User:", currentUser.name, telegramId);
       return ctx.reply(result);
     }
 
+    if (getRequestedProgram(text)) {
+      const result = await runAgentTask(text, currentUser);
+      return ctx.reply(result);
+    }
+
     // Sky Agent Mode
-if (lower.startsWith("sky ")) {
-  const task = text.replace(/^sky/i, "").trim();
+if (skyTask) {
+  const task = skyTask;
 
   const result = await runAgentTask(task, currentUser);
 
