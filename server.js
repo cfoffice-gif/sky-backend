@@ -20,6 +20,8 @@ const SERPAPI_API_KEY = process.env.SERPAPI_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const PYTHON_AGENT_URL = process.env.PYTHON_AGENT_URL || "http://127.0.0.1:3002/desktop";
+const BUSINESS_HOUR_START = Number(process.env.BUSINESS_HOUR_START || 8);
+const BUSINESS_HOUR_END = Number(process.env.BUSINESS_HOUR_END || 17);
 
 const USERS = {
   "8675862264": {
@@ -27,7 +29,7 @@ const USERS = {
     role: "ocala branch manager",
     email: "chelsi@centennialpools.com"
   },
-  "SARA_TELEGRAM_ID": {
+  "8956452360": {
     name: "Sara",
     role: "owner",
     email: "sara@centennialpools.com"
@@ -108,6 +110,326 @@ async function saveReminder(userName, telegramId, reminder, dueAt, originalText)
   }
 
   return { data, error };
+}
+
+function isBusinessHours(date = new Date()) {
+  const day = date.getDay();
+  const hour = date.getHours();
+
+  return day >= 1 && day <= 5 && hour >= BUSINESS_HOUR_START && hour < BUSINESS_HOUR_END;
+}
+
+function nextBusinessStart(date = new Date()) {
+  const next = new Date(date);
+  next.setSeconds(0, 0);
+
+  if (next.getHours() < BUSINESS_HOUR_START && next.getDay() >= 1 && next.getDay() <= 5) {
+    next.setHours(BUSINESS_HOUR_START, 0, 0, 0);
+    return next;
+  }
+
+  next.setDate(next.getDate() + 1);
+  next.setHours(BUSINESS_HOUR_START, 0, 0, 0);
+
+  while (next.getDay() === 0 || next.getDay() === 6) {
+    next.setDate(next.getDate() + 1);
+  }
+
+  return next;
+}
+
+function nextBusinessReminderTime(fromDate = new Date()) {
+  const next = new Date(fromDate.getTime() + 60 * 60 * 1000);
+  next.setSeconds(0, 0);
+
+  if (isBusinessHours(next)) {
+    return next;
+  }
+
+  return nextBusinessStart(next);
+}
+
+function getReminderOwnerId(currentUser) {
+  return String(currentUser.telegramUserId || currentUser.telegramId || "");
+}
+
+function isUsableTelegramUserId(telegramId) {
+  return /^\d+$/.test(String(telegramId || ""));
+}
+
+function findConfiguredUserByName(name) {
+  const requestedName = String(name || "").trim().toLowerCase();
+
+  if (!requestedName || requestedName === "me" || requestedName === "myself") {
+    return null;
+  }
+
+  for (const [telegramUserId, user] of Object.entries(USERS)) {
+    if (!isUsableTelegramUserId(telegramUserId)) {
+      continue;
+    }
+
+    if (String(user.name || "").toLowerCase() === requestedName) {
+      return {
+        ...user,
+        telegramUserId,
+        telegramId: telegramUserId
+      };
+    }
+  }
+
+  return null;
+}
+
+function resolveReminderRecipient(currentUser, recipientName) {
+  const requestedName = String(recipientName || "").trim();
+
+  if (!requestedName || requestedName.toLowerCase() === "me" || requestedName.toLowerCase() === "myself") {
+    return { recipient: currentUser, error: null };
+  }
+
+  const configuredUser = findConfiguredUserByName(requestedName);
+
+  if (!configuredUser) {
+    return {
+      recipient: null,
+      error: `I don't have a Telegram user configured for ${requestedName}, so I couldn't set that reminder for them.`
+    };
+  }
+
+  return { recipient: configuredUser, error: null };
+}
+
+async function listActiveReminders(currentUser) {
+  return listReminderMemory(currentUser, { status: "active" });
+}
+
+async function listReminderMemory(currentUser, options = {}) {
+  const ownerId = getReminderOwnerId(currentUser);
+  const status = options.status || "active";
+  const searchText = String(options.searchText || "").trim().toLowerCase();
+
+  if (!ownerId) {
+    return { data: [], error: null };
+  }
+
+  let query = supabase
+    .from("reminders")
+    .select("*")
+    .eq("telegram_id", ownerId);
+
+  if (status === "active") {
+    query = query.eq("completed", false).order("due_at", { ascending: true });
+  } else if (status === "completed") {
+    query = query.eq("completed", true).order("created_at", { ascending: false });
+  } else {
+    query = query.order("created_at", { ascending: false });
+  }
+
+  const { data, error } = await query.limit(50);
+
+  if (error) {
+    return { data: [], error };
+  }
+
+  let reminders = data || [];
+
+  if (searchText) {
+    reminders = reminders.filter((reminder) => {
+      const reminderText = String(reminder.reminder || "").toLowerCase();
+      const originalText = String(reminder.original_text || "").toLowerCase();
+      return reminderText.includes(searchText) || originalText.includes(searchText);
+    });
+  }
+
+  return { data: reminders, error: null };
+}
+
+function formatReminderDate(value) {
+  if (!value) {
+    return "";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return date.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  });
+}
+
+function formatReminderList(reminders, options = {}) {
+  const status = options.status || "active";
+
+  if (!reminders || reminders.length === 0) {
+    if (status === "completed") {
+      return "I don't see any past reminders for you yet.";
+    }
+
+    if (status === "all") {
+      return "I don't see any reminders for you yet.";
+    }
+
+    return "You don't have any active reminders.";
+  }
+
+  let message = "Here are your active reminders:\n\n";
+
+  if (status === "completed") {
+    message = "Here are your past reminders:\n\n";
+  } else if (status === "all") {
+    message = "Here are the reminders I have in memory for you:\n\n";
+  }
+
+  reminders.forEach((reminder, index) => {
+    const dueAt = formatReminderDate(reminder.due_at);
+    const state = reminder.completed ? "completed" : "active";
+    const detail = dueAt ? ` (${state}, ${dueAt})` : ` (${state})`;
+    message += `${index + 1}. ${reminder.reminder}${detail}\n`;
+  });
+
+  return message.trim();
+}
+
+function getReminderQueryOptions(lower) {
+  let status = "active";
+
+  if (
+    lower.includes("past reminder") ||
+    lower.includes("old reminder") ||
+    lower.includes("completed reminder") ||
+    lower.includes("reminder history") ||
+    lower.includes("reminders have i had") ||
+    lower.includes("previous reminder")
+  ) {
+    status = "completed";
+  } else if (
+    lower.includes("all reminders") ||
+    lower.includes("every reminder") ||
+    lower.includes("reminder memory") ||
+    lower.includes("reminders in memory") ||
+    lower.includes("did i have") ||
+    lower.includes("have i had")
+  ) {
+    status = "all";
+  }
+
+  let searchText = "";
+  const searchMatch = lower.match(/\b(?:about|for|on|regarding)\s+(.+)$/);
+
+  if (searchMatch) {
+    searchText = searchMatch[1]
+      .replace(/[?.!]+$/g, "")
+      .replace(/\breminders?\b/g, "")
+      .trim();
+  }
+
+  return { status, searchText };
+}
+
+function isListReminderRequest(lower) {
+  return (
+    lower === "what reminders do i have?" ||
+    lower === "what reminders do i have" ||
+    lower.includes("what reminders do i have in place") ||
+    lower.includes("reminders do i have in place") ||
+    lower.includes("what reminders are in place") ||
+    lower.includes("tell me what reminders") ||
+    lower.includes("show my reminders") ||
+    lower.includes("list my reminders") ||
+    lower.includes("my reminders") ||
+    lower.includes("past reminders") ||
+    lower.includes("old reminders") ||
+    lower.includes("completed reminders") ||
+    lower.includes("reminder history") ||
+    lower.includes("reminder memory") ||
+    lower.includes("reminders in memory") ||
+    lower.includes("reminders have i had") ||
+    (lower.includes("reminder") && /\b(did|do|what|show|list|tell)\b/.test(lower)) ||
+    lower.includes("what is in my queue") ||
+    lower.includes("what do i need to do")
+  );
+}
+
+function isCompleteReminderRequest(lower) {
+  return (
+    (lower.includes("reminder") || /\bthem\b/.test(lower)) &&
+    (
+      lower.includes("complete") ||
+      lower.includes("completed") ||
+      lower.includes("done") ||
+      lower.includes("finished")
+    )
+  );
+}
+
+async function completeReminderFromText(currentUser, lower) {
+  const { data: reminders, error } = await listActiveReminders(currentUser);
+
+  if (error) {
+    return "I couldn't update your reminders right now.";
+  }
+
+  if (!reminders.length) {
+    return "You don't have any active reminders to complete.";
+  }
+
+  const completeAll = /\b(all|them)\b/.test(lower);
+  const numberMatch = lower.match(/\b(\d+)\b/);
+  let remindersToComplete = [];
+
+  if (completeAll) {
+    remindersToComplete = reminders;
+  } else if (numberMatch) {
+    const reminderIndex = Number(numberMatch[1]) - 1;
+    if (reminderIndex >= 0 && reminderIndex < reminders.length) {
+      remindersToComplete = [reminders[reminderIndex]];
+    }
+  } else {
+    const searchText = lower
+      .replace(/sky/g, "")
+      .replace(/reminders?/g, "")
+      .replace(/mark/g, "")
+      .replace(/complete(d)?/g, "")
+      .replace(/done/g, "")
+      .replace(/finished/g, "")
+      .trim();
+
+    if (searchText) {
+      remindersToComplete = reminders.filter((reminder) =>
+        String(reminder.reminder || "").toLowerCase().includes(searchText)
+      );
+    }
+  }
+
+  if (!remindersToComplete.length) {
+    return "I couldn't tell which reminder to complete. You can say, for example, \"complete reminder 1.\"";
+  }
+
+  const ids = remindersToComplete.map((reminder) => reminder.id);
+  const { error: updateError } = await supabase
+    .from("reminders")
+    .update({
+      completed: true,
+      sent: true
+    })
+    .in("id", ids);
+
+  if (updateError) {
+    return "I couldn't mark that reminder completed right now.";
+  }
+
+  if (ids.length === 1) {
+    return "Done. I marked that reminder completed.";
+  }
+
+  return `Done. I marked ${ids.length} reminders completed.`;
 }
 async function createDesktopJob(currentUser, action, payload, description) {
   const { data, error } = await supabase
@@ -313,11 +635,15 @@ Return JSON only in this exact format:
 async function getDueReminders() {
   const now = new Date().toISOString();
 
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("reminders")
     .select("*")
     .lte("due_at", now)
-    .eq("sent", false);
+    .eq("completed", false);
+
+  if (error) {
+    console.error("Due reminders fetch error:", error);
+  }
 
   return data || [];
 }    
@@ -329,6 +655,20 @@ const bot = new Bot(TELEGRAM_BOT_TOKEN);
 setInterval(async () => {
   try {
     const reminders = await getDueReminders();
+    const now = new Date();
+
+    if (!isBusinessHours(now)) {
+      const nextDueAt = nextBusinessStart(now).toISOString();
+
+      for (const reminder of reminders) {
+        await supabase
+          .from("reminders")
+          .update({ due_at: nextDueAt, sent: false })
+          .eq("id", reminder.id);
+      }
+
+      return;
+    }
 
     for (const reminder of reminders) {
       const telegramId = reminder.telegram_id;
@@ -342,7 +682,10 @@ setInterval(async () => {
 
       await supabase
         .from("reminders")
-        .update({ sent: true })
+        .update({
+          due_at: nextBusinessReminderTime(now).toISOString(),
+          sent: false
+        })
         .eq("id", reminder.id);
     }
   } catch (err) {
@@ -1091,28 +1434,14 @@ const result = await executeAgentTool(tool);
 console.log("Result:", result);
 
 if (result.listReminders) {
-  const { data, error } = await supabase
-    .from("reminders")
-    .select("*")
-    .eq("telegram_id", currentUser.telegramId)
-    .eq("completed", false)
-    .order("due_at", { ascending: true });
+  const queryOptions = getReminderQueryOptions(task.toLowerCase());
+  const { data, error } = await listReminderMemory(currentUser, queryOptions);
 
   if (error) {
     return "I couldn't retrieve your reminders right now.";
   }
 
-  if (!data || data.length === 0) {
-    return "You don't have any active reminders.";
-  }
-
-  let message = "Here are your active reminders:\n\n";
-
-  for (const reminder of data) {
-    message += `• ${reminder.reminder}\n`;
-  }
-
-  return message;
+  return formatReminderList(data, queryOptions);
 }
     
     if (tool.action === "remember") {
@@ -1143,8 +1472,20 @@ ${task}
 Return JSON in this exact format:
 {
   "reminder": "what to remind the user",
-  "dueAt": "ISO date time"
+  "dueAt": "ISO date time",
+  "recipientName": "me"
 }
+
+Rules:
+- If the user asks Sky to remind someone else, put that person's first name in recipientName.
+- If the reminder is for the person asking, use "me".
+
+Examples:
+User request: Remind me tomorrow to call Johnson.
+JSON: {"reminder":"call Johnson","dueAt":"ISO date time","recipientName":"me"}
+
+User request: Remind Sara tomorrow to review permits.
+JSON: {"reminder":"review permits","dueAt":"ISO date time","recipientName":"Sara"}
 `
   );
  console.log("Reminder reply:", reply); 
@@ -1157,13 +1498,26 @@ Return JSON in this exact format:
     return "I understood this is a reminder, but I couldn't understand the time. Please say something like: Sky remind me in 2 minutes to call Johnson.";
   }
 
+  const { recipient, error: recipientError } = resolveReminderRecipient(
+    currentUser,
+    parsed.recipientName
+  );
+
+  if (recipientError) {
+    return recipientError;
+  }
+
   await saveReminder(
-  currentUser.name,
-  currentUser.telegramId,
-  parsed.reminder,
-  parsed.dueAt,
-  task
-);
+    recipient.name,
+    getReminderOwnerId(recipient),
+    parsed.reminder,
+    parsed.dueAt,
+    task
+  );
+
+  if (getReminderOwnerId(recipient) !== getReminderOwnerId(currentUser)) {
+    return `Okay, I will remind ${recipient.name}.`;
+  }
 
   return "Okay, I will remind you.";
 }
@@ -1272,9 +1626,39 @@ bot.on("message:text", async (ctx) => {
     email: null
   };
 
+  currentUser.telegramUserId = telegramId;
+  currentUser.chatId = String(ctx.chat.id);
   currentUser.telegramId = String(ctx.chat.id);
 
 console.log("User:", currentUser.name, telegramId);
+
+    const reminderCommand = lower.replace(/^sky\s+/, "");
+
+    if (isListReminderRequest(reminderCommand)) {
+      const queryOptions = getReminderQueryOptions(reminderCommand);
+      const { data, error } = await listReminderMemory(currentUser, queryOptions);
+
+      if (error) {
+        return ctx.reply("I couldn't retrieve your reminders right now.");
+      }
+
+      return ctx.reply(formatReminderList(data, queryOptions));
+    }
+
+    if (isCompleteReminderRequest(reminderCommand)) {
+      const message = await completeReminderFromText(currentUser, reminderCommand);
+      return ctx.reply(message);
+    }
+
+    if (
+      lower.startsWith("remind ") ||
+      lower.startsWith("set a reminder") ||
+      lower.startsWith("create a reminder")
+    ) {
+      const result = await runAgentTask(text, currentUser);
+      return ctx.reply(result);
+    }
+
     // Sky Agent Mode
 if (lower.startsWith("sky ")) {
   const task = text.replace(/^sky/i, "").trim();

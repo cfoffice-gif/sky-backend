@@ -19,9 +19,16 @@ function createMemoryModule(supabase) {
     return data || [];
   }
 
-  async function saveReminder(userName, reminder, dueAt) {
+  async function saveReminder(userName, reminder, dueAt, telegramId = "") {
     const { error } = await supabase.from("reminders").insert([
-      { user_name: userName, reminder, due_at: dueAt }
+      {
+        user_name: userName,
+        telegram_id: String(telegramId || ""),
+        reminder,
+        due_at: dueAt,
+        completed: false,
+        sent: false
+      }
     ]);
 
     if (error) console.error("Reminder insert error:", error);
@@ -34,7 +41,7 @@ function createMemoryModule(supabase) {
       .from("reminders")
       .select("*")
       .lte("due_at", now)
-      .eq("sent", false);
+      .eq("completed", false);
 
     if (error) console.error("Due reminders fetch error:", error);
     return data || [];
