@@ -19,6 +19,28 @@ function createMemoryModule(supabase) {
     return data || [];
   }
 
+  async function savePreference(userId, key, value) {
+    const { error } = await supabase.from("preferences").insert({
+      user_id: String(userId || ""),
+      key,
+      value: typeof value === "string" ? value : JSON.stringify(value)
+    });
+
+    if (error) console.error("Preference insert error:", error);
+  }
+
+  async function getPreferences(userId) {
+    const { data, error } = await supabase
+      .from("preferences")
+      .select("*")
+      .eq("user_id", String(userId || ""))
+      .order("created_at", { ascending: false })
+      .limit(50);
+
+    if (error) console.error("Preference fetch error:", error);
+    return data || [];
+  }
+
   async function saveReminder(userName, reminder, dueAt, telegramId = "") {
     const { error } = await supabase.from("reminders").insert([
       {
@@ -73,6 +95,8 @@ function createMemoryModule(supabase) {
   return {
     saveMemory,
     getMemories,
+    savePreference,
+    getPreferences,
     saveReminder,
     getDueReminders,
     markReminderSent,

@@ -66,6 +66,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
 });
 
 const memory = createMemoryModule(supabase);
+const recentReminderContext = new Map();
 
 async function saveMemory(userName, category, memory) {
   await supabase.from("memories").insert([
@@ -112,6 +113,82 @@ async function saveReminder(userName, telegramId, reminder, dueAt, originalText)
   return { data, error };
 }
 
+function safeJsonParse(value, fallback = null) {
+  try {
+    return JSON.parse(value);
+  } catch (err) {
+    return fallback;
+  }
+}
+
+async function saveUserPreference(userId, key, value) {
+  const { data, error } = await supabase
+    .from("preferences")
+    .insert({
+      user_id: String(userId || ""),
+      key,
+      value: JSON.stringify(value)
+    })
+    .select()
+    .single();
+
+  if (error) {
+    console.error("Preference insert error:", error);
+  }
+
+  return { data, error };
+}
+
+async function listUserPreferences(userId) {
+  const { data, error } = await supabase
+    .from("preferences")
+    .select("*")
+    .eq("user_id", String(userId || ""))
+    .order("created_at", { ascending: false })
+    .limit(50);
+
+  if (error) {
+    console.error("Preference fetch error:", error);
+  }
+
+  return data || [];
+}
+
+async function getReminderPreferences(userId) {
+  const rows = await listUserPreferences(userId);
+  const preferences = {};
+
+  for (const row of rows) {
+    if (!String(row.key || "").startsWith("reminder.")) {
+      continue;
+    }
+
+    if (preferences[row.key]) {
+      continue;
+    }
+
+    preferences[row.key] = safeJsonParse(row.value, {
+      value: row.value,
+      originalText: row.value
+    });
+  }
+
+  return preferences;
+}
+
+async function savePersonMemory(personName, category, text) {
+  const targetName = String(personName || "").trim() || "office";
+  const memoryCategory = String(category || "fact").trim() || "fact";
+
+  await supabase.from("memories").insert([
+    {
+      user_name: targetName,
+      category: memoryCategory,
+      memory: text
+    }
+  ]);
+}
+
 function isBusinessHours(date = new Date()) {
   const day = date.getDay();
   const hour = date.getHours();
@@ -149,6 +226,77 @@ function nextBusinessReminderTime(fromDate = new Date()) {
   return nextBusinessStart(next);
 }
 
+function nextTimeTodayOrTomorrow(fromDate, hour) {
+  const next = new Date(fromDate);
+  next.setHours(hour, 0, 0, 0);
+
+  if (next <= fromDate) {
+    next.setDate(next.getDate() + 1);
+  }
+
+  while (next.getDay() === 0 || next.getDay() === 6) {
+    next.setDate(next.getDate() + 1);
+  }
+
+  return next;
+}
+
+function nextMorningAfternoonReminderTime(fromDate = new Date()) {
+  const morning = nextTimeTodayOrTomorrow(fromDate, 9);
+  const afternoon = nextTimeTodayOrTomorrow(fromDate, 14);
+
+  return morning < afternoon ? morning : afternoon;
+}
+
+function getPreferenceMinutes(preference, fallbackMinutes) {
+  const minutes = Number(preference && preference.minutes);
+  return Number.isFinite(minutes) && minutes > 0 ? minutes : fallbackMinutes;
+}
+
+function addMinutesDuringBusinessHours(fromDate, minutes) {
+  const next = new Date(fromDate.getTime() + minutes * 60 * 1000);
+  next.setSeconds(0, 0);
+
+  if (isBusinessHours(next)) {
+    return next;
+  }
+
+  return nextBusinessStart(next);
+}
+
+async function getNextReminderTimeFor(reminder, fromDate = new Date()) {
+  const preferences = await getReminderPreferences(reminder.telegram_id);
+  const reminderText = String(reminder.reminder || "").toLowerCase();
+  const originalText = String(reminder.original_text || "").toLowerCase();
+  const isUrgent = reminderText.includes("urgent") || originalText.includes("urgent");
+
+  if (isUrgent && preferences["reminder.urgent_frequency"]) {
+    return addMinutesDuringBusinessHours(
+      fromDate,
+      getPreferenceMinutes(preferences["reminder.urgent_frequency"], 30)
+    );
+  }
+
+  const defaultFrequency = preferences["reminder.default_frequency"];
+  const reminderWindow = preferences["reminder.window"];
+
+  if (
+    (defaultFrequency && defaultFrequency.mode === "morning_afternoon") ||
+    (reminderWindow && reminderWindow.mode === "morning_afternoon")
+  ) {
+    return nextMorningAfternoonReminderTime(fromDate);
+  }
+
+  if (defaultFrequency && defaultFrequency.minutes) {
+    return addMinutesDuringBusinessHours(
+      fromDate,
+      getPreferenceMinutes(defaultFrequency, 60)
+    );
+  }
+
+  return nextBusinessReminderTime(fromDate);
+}
+
 function getReminderOwnerId(currentUser) {
   return String(currentUser.telegramUserId || currentUser.telegramId || "");
 }
@@ -167,6 +315,96 @@ function isIdentityRequest(lower) {
 function formatUserIdentity(currentUser) {
   const email = currentUser.email || "no email on file";
   return `You are ${currentUser.name}. Your role is ${currentUser.role}, and your email is ${email}.`;
+}
+
+function looksLikePreferenceOrFact(lower) {
+  return (
+    lower.startsWith("from now on") ||
+    lower.startsWith("set my ") ||
+    lower.startsWith("only remind me") ||
+    lower.startsWith("for urgent reminders") ||
+    lower.startsWith("remember ") ||
+    lower.startsWith("save ")
+  );
+}
+
+async function parsePreferenceOrFact(currentUser, text) {
+  const reply = await askOpenAI(
+    SYSTEM_PROMPT,
+    `
+Classify this message for Sky's persistent memory system.
+
+Current user:
+${JSON.stringify(currentUser, null, 2)}
+
+Message:
+${text}
+
+Return JSON only in this exact format:
+{
+  "action": "savePreference" | "saveFact" | "none",
+  "key": "reminder.default_frequency",
+  "value": {
+    "mode": "interval_minutes",
+    "minutes": 60,
+    "appliesTo": "all",
+    "originalText": "original message"
+  },
+  "personName": "Sara",
+  "category": "contact",
+  "fact": "Sara's phone number is ..."
+}
+
+Rules:
+- Use savePreference for persistent behavior rules about how Sky should behave.
+- Use saveFact for remembered facts/contact details like phone numbers and emails.
+- Use none if this is asking Sky to perform a one-time task.
+- Reminder preference keys should be:
+  - reminder.default_frequency for general reminder cadence.
+  - reminder.urgent_frequency for urgent reminder cadence.
+  - reminder.window for allowed reminder windows.
+- "twice a day", "morning and afternoon", or similar should use mode "morning_afternoon".
+- "every hour" should use mode "interval_minutes" and minutes 60.
+- "every 30 minutes" should use mode "interval_minutes" and minutes 30.
+- Include originalText in value.
+`
+  );
+
+  return safeJsonParse(reply, { action: "none" });
+}
+
+async function handlePreferenceOrFact(currentUser, text) {
+  const parsed = await parsePreferenceOrFact(currentUser, text);
+
+  if (!parsed || parsed.action === "none") {
+    return null;
+  }
+
+  if (parsed.action === "savePreference") {
+    const key = parsed.key || "preference.note";
+    const value = parsed.value || { originalText: text };
+    value.originalText = value.originalText || text;
+
+    await saveUserPreference(getReminderOwnerId(currentUser), key, value);
+
+    if (String(key).startsWith("reminder.")) {
+      return "Got it. I saved that reminder preference for you.";
+    }
+
+    return "Got it. I saved that preference for you.";
+  }
+
+  if (parsed.action === "saveFact") {
+    await savePersonMemory(
+      parsed.personName || currentUser.name,
+      parsed.category || "fact",
+      parsed.fact || text
+    );
+
+    return "Got it. I saved that.";
+  }
+
+  return null;
 }
 
 function isUsableTelegramUserId(telegramId) {
@@ -216,8 +454,38 @@ function resolveReminderRecipient(currentUser, recipientName) {
   return { recipient: configuredUser, error: null };
 }
 
-async function listActiveReminders(currentUser) {
-  return listReminderMemory(currentUser, { status: "active" });
+async function listActiveReminders(currentUser, options = {}) {
+  return listReminderMemory(currentUser, {
+    status: "active",
+    rememberContext: options.rememberContext
+  });
+}
+
+function setRecentReminderContext(ownerId, reminder) {
+  if (!ownerId || !reminder || !reminder.id) {
+    return;
+  }
+
+  recentReminderContext.set(String(ownerId), {
+    id: reminder.id,
+    reminder: reminder.reminder,
+    setAt: Date.now()
+  });
+}
+
+function getRecentReminderContext(ownerId) {
+  const context = recentReminderContext.get(String(ownerId || ""));
+
+  if (!context) {
+    return null;
+  }
+
+  if (Date.now() - context.setAt > 24 * 60 * 60 * 1000) {
+    recentReminderContext.delete(String(ownerId || ""));
+    return null;
+  }
+
+  return context;
 }
 
 async function listReminderMemory(currentUser, options = {}) {
@@ -256,6 +524,10 @@ async function listReminderMemory(currentUser, options = {}) {
       const originalText = String(reminder.original_text || "").toLowerCase();
       return reminderText.includes(searchText) || originalText.includes(searchText);
     });
+  }
+
+  if (reminders.length > 0 && status === "active" && options.rememberContext !== false) {
+    setRecentReminderContext(ownerId, reminders[0]);
   }
 
   return { data: reminders, error: null };
@@ -386,7 +658,10 @@ function isCompleteReminderRequest(lower) {
 }
 
 async function completeReminderFromText(currentUser, lower) {
-  const { data: reminders, error } = await listActiveReminders(currentUser);
+  const { data: reminders, error } = await listActiveReminders(currentUser, {
+    rememberContext: false
+  });
+  const ownerId = getReminderOwnerId(currentUser);
 
   if (error) {
     return "I couldn't update your reminders right now.";
@@ -406,6 +681,16 @@ async function completeReminderFromText(currentUser, lower) {
     const reminderIndex = Number(numberMatch[1]) - 1;
     if (reminderIndex >= 0 && reminderIndex < reminders.length) {
       remindersToComplete = [reminders[reminderIndex]];
+    }
+  } else if (/\b(that|it|this)\b/.test(lower)) {
+    const recentContext = getRecentReminderContext(ownerId);
+
+    if (recentContext) {
+      const recentReminder = reminders.find((reminder) => reminder.id === recentContext.id);
+
+      if (recentReminder) {
+        remindersToComplete = [recentReminder];
+      }
     }
   } else {
     const searchText = lower
@@ -442,9 +727,11 @@ async function completeReminderFromText(currentUser, lower) {
   }
 
   if (ids.length === 1) {
+    recentReminderContext.delete(ownerId);
     return "Done. I marked that reminder completed.";
   }
 
+  recentReminderContext.delete(ownerId);
   return `Done. I marked ${ids.length} reminders completed.`;
 }
 async function createDesktopJob(currentUser, action, payload, description) {
@@ -864,10 +1151,12 @@ setInterval(async () => {
         "🔔 Reminder: " + reminder.reminder
       );
 
+      setRecentReminderContext(telegramId, reminder);
+
       await supabase
         .from("reminders")
         .update({
-          due_at: nextBusinessReminderTime(now).toISOString(),
+          due_at: (await getNextReminderTimeFor(reminder, now)).toISOString(),
           sent: true
         })
         .eq("id", reminder.id);
@@ -1681,7 +1970,8 @@ JSON: {"reminder":"review permits","dueAt":"ISO date time","recipientName":"Sara
     return recipientError;
   }
 
-  await saveReminder(
+  const recipientReminderPreferences = await getReminderPreferences(getReminderOwnerId(recipient));
+  const savedReminder = await saveReminder(
     recipient.name,
     getReminderOwnerId(recipient),
     parsed.reminder,
@@ -1689,8 +1979,16 @@ JSON: {"reminder":"review permits","dueAt":"ISO date time","recipientName":"Sara
     task
   );
 
+  if (savedReminder.data && savedReminder.data[0]) {
+    setRecentReminderContext(getReminderOwnerId(recipient), savedReminder.data[0]);
+  }
+
   if (getReminderOwnerId(recipient) !== getReminderOwnerId(currentUser)) {
     return `Okay, I will remind ${recipient.name}.`;
+  }
+
+  if (Object.keys(recipientReminderPreferences).length > 0) {
+    return "Okay, I will remind you and use your saved reminder preferences.";
   }
 
   return "Okay, I will remind you.";
@@ -1811,6 +2109,18 @@ console.log("User:", currentUser.name, telegramId);
 
     if (isIdentityRequest(reminderCommand)) {
       return ctx.reply(formatUserIdentity(currentUser));
+    }
+
+    if (
+      looksLikePreferenceOrFact(reminderCommand) &&
+      !reminderCommand.startsWith("remember office ")
+    ) {
+      const memoryText = skyTask || text;
+      const memoryResponse = await handlePreferenceOrFact(currentUser, memoryText);
+
+      if (memoryResponse) {
+        return ctx.reply(memoryResponse);
+      }
     }
 
     if (isListReminderRequest(reminderCommand)) {
