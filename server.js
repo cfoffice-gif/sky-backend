@@ -153,6 +153,22 @@ function getReminderOwnerId(currentUser) {
   return String(currentUser.telegramUserId || currentUser.telegramId || "");
 }
 
+function isIdentityRequest(lower) {
+  return (
+    lower === "who am i" ||
+    lower === "who am i?" ||
+    lower === "what user am i" ||
+    lower === "what user am i?" ||
+    lower === "which user am i" ||
+    lower === "which user am i?"
+  );
+}
+
+function formatUserIdentity(currentUser) {
+  const email = currentUser.email || "no email on file";
+  return `You are ${currentUser.name}. Your role is ${currentUser.role}, and your email is ${email}.`;
+}
+
 function isUsableTelegramUserId(telegramId) {
   return /^\d+$/.test(String(telegramId || ""));
 }
@@ -829,23 +845,19 @@ setInterval(async () => {
     const reminders = await getDueReminders();
     const now = new Date();
 
-    if (!isBusinessHours(now)) {
-      const nextDueAt = nextBusinessStart(now).toISOString();
-
-      for (const reminder of reminders) {
-        await supabase
-          .from("reminders")
-          .update({ due_at: nextDueAt, sent: false })
-          .eq("id", reminder.id);
-      }
-
-      return;
-    }
-
     for (const reminder of reminders) {
       const telegramId = reminder.telegram_id;
 
       if (!telegramId) continue;
+
+      if (!isBusinessHours(now) && reminder.sent) {
+        await supabase
+          .from("reminders")
+          .update({ due_at: nextBusinessStart(now).toISOString() })
+          .eq("id", reminder.id);
+
+        continue;
+      }
 
       await bot.api.sendMessage(
         telegramId,
@@ -856,7 +868,7 @@ setInterval(async () => {
         .from("reminders")
         .update({
           due_at: nextBusinessReminderTime(now).toISOString(),
-          sent: false
+          sent: true
         })
         .eq("id", reminder.id);
     }
@@ -1797,6 +1809,10 @@ console.log("User:", currentUser.name, telegramId);
     const skyTask = getSkyTask(text);
     const reminderCommand = skyTask ? skyTask.toLowerCase() : lower;
 
+    if (isIdentityRequest(reminderCommand)) {
+      return ctx.reply(formatUserIdentity(currentUser));
+    }
+
     if (isListReminderRequest(reminderCommand)) {
       const queryOptions = getReminderQueryOptions(reminderCommand);
       const { data, error } = await listReminderMemory(currentUser, queryOptions);
@@ -2089,7 +2105,16 @@ if (lower.startsWith("sky hotkey")) {
 // Natural language secretary brain disabled
 
 // Normal AI chat
-const reply = await askOpenAI(SYSTEM_PROMPT, text);
+const reply = await askOpenAI(
+  SYSTEM_PROMPT,
+  `
+Current user:
+${JSON.stringify(currentUser, null, 2)}
+
+User message:
+${text}
+`
+);
 return ctx.reply(reply);
 
 } catch (err) {
